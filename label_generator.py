@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import numpy as np
 from skimage import segmentation
 
@@ -30,6 +32,7 @@ class SuperPixelAlign(object):
         sample_indices = np.random.randint(0, superpixels.shape[1], size=self.n_sample_points)
 
         sample_points = superpixels[:, sample_indices]
+        original_sample = sample_points.copy()
         sample_points = np.matmul(M, sample_points)
 
         x_s = sample_points[0, :]
@@ -63,7 +66,8 @@ class SuperPixelAlign(object):
 
         interpolated = wa * Ia + wb * Ib + wc * Ic + wd * Id
         interpolated = np.hstack(
-            (interpolated, x_s.reshape((self.n_sample_points, 1)), y_s.reshape((self.n_sample_points, 1))))
+            (interpolated, original_sample[0, :].reshape((self.n_sample_points, 1)),
+             original_sample[1, :].reshape((self.n_sample_points, 1))))
         return interpolated
 
     def align(self, img, features):
@@ -74,3 +78,46 @@ class SuperPixelAlign(object):
             superpixel_aligned[i] = self.bilinear_interpolate(img, features, segments, i)
 
         return superpixel_aligned, segments
+
+
+class WeightedKMeans(object):
+    def __init__(self, k, mu, sigma, thresh=0.0):
+        self.k = k
+        self.thresh = thresh
+        self.mu = mu
+        self.sigma = sigma
+
+    def get_weights(self, pixels):
+        pxy = pixels[:, -2:]
+        pxy = pxy - self.mu
+        pxy = np.abs(pxy)
+        pxy = np.sum(pxy, axis=1)
+        pxy = pxy ** 2
+        pxy = pxy / (2 * (self.sigma ** 2))
+        pxy = np.exp(-pxy)
+        wi = np.sum(pxy)
+        wi /= len(pixels)
+        return wi
+
+    def dist(self, a, b, axis=1):
+        return np.linalg.norm(a - b, axis=axis) ** 2
+
+    def fit(self, sxy):
+        si = np.mean(sxy, axis=1)
+        si = si[:, :-2]
+        weights = np.array([self.get_weights(sxy[i]) for i in range(len(sxy))])
+        median = np.median(weights)
+        labels = np.array([0 if weights[i] > median else np.random.randint(1, self.k) for i in range(len(sxy))])
+        c = si[np.random.randint(0, len(si), size=self.k)]
+        c_old = np.zeros((self.k, si.shape[1]))
+
+        while self.dist(c, c_old, None) > self.thresh:
+            c_old = deepcopy(c)
+            temp = weights[labels == 0].reshape((-1, 1)) * si[labels == 0]
+            c[0] = np.sum(temp, axis=0) / (np.sum(weights[labels == 0]) + 1e-10)
+            for i in range(1, self.k):
+                temp = (1 - weights[labels == i]).reshape((-1, 1)) * si[labels == i]
+                c[i] = np.sum(temp, axis=0) / (np.sum(1 - weights[labels == i]) + 1e-10)
+            for j in range((len(si))):
+                labels[j] = np.argmin((self.dist(c, si[j].reshape((1, -1)))).reshape((-1)))
+        return c, labels
