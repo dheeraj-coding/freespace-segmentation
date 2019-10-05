@@ -1,7 +1,9 @@
 from copy import deepcopy
 
 import numpy as np
+import torch
 from skimage import segmentation
+import tqdm
 
 
 class SuperPixelAlign(object):
@@ -121,3 +123,61 @@ class WeightedKMeans(object):
             for j in range((len(si))):
                 labels[j] = np.argmin((self.dist(c, si[j].reshape((1, -1)))).reshape((-1)))
         return c, labels
+
+
+class LabelGenerator(object):
+    def __init__(self, img_shape, feature_shape, scale=100, sigma=0.5, min_size=50, n_sample_points=15, k=5,
+                 mu=(0.5, 0.), psigma=0.1, thresh=0.0001):
+        self.img_shape = img_shape
+        self.feature_shape = feature_shape
+        self.scale = scale
+        self.sigma = sigma
+        self.min_size = min_size
+        self.n_sample_points = n_sample_points
+        self.k = k
+        self.mu = np.array([[mu[0], mu[1]]])
+        self.psigma = psigma
+        self.thresh = thresh
+        self.aligner = SuperPixelAlign(self.scale, self.sigma, self.min_size, self.n_sample_points, self.feature_shape,
+                                       self.img_shape)
+        self.kmeans = WeightedKMeans(self.k, self.mu, self.psigma, self.thresh)
+
+    def process_batch(self, prediction, xo):
+        result = None
+        batch = xo.size()[0]
+        for i in range(batch):
+            superpixel_aligned, segments = self.aligner.align(xo[i], prediction[i])
+            c, labels = self.kmeans.fit(superpixel_aligned)
+            for j in np.unique(segments):
+                segments[segments == j] = labels[j]
+            if result is None:
+                result = np.zeros((1, self.img_shape[0], self.img_shape[1]))
+                result[0] = segments
+            else:
+                result = np.vstack((result, np.expand_dims(segments, axis=0)))
+        return result
+
+    def generate(self, dataloader, model):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            model.cuda()
+        model.eval()
+        progress = tqdm.tqdm()
+        images = None
+        result = None
+        for x, xo in dataloader:
+            x = x.to(device)
+            prediction = model(x)
+            prediction = prediction.permute(0, 2, 3, 1)
+            prediction = prediction.cpu().detach().numpy()
+            batch_result = self.process_batch(prediction, xo)
+            if result is None:
+                result = batch_result
+            else:
+                result = np.vstack((result, batch_result))
+            if images is None:
+                images = xo
+            else:
+                images = np.vstack((images, xo))
+            progress.update()
+        return result, images
